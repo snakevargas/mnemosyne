@@ -26,7 +26,7 @@ int main() {
   ftruncate(shm_fd, thingy_size);
 
   // Mmap the shared mem
-  printf("Size: %lu\n", thingy_size);
+  printf("Size: %du\n", thingy_size);
   void *shared_thingy = mmap(NULL, thingy_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
   printf("Shared thingy address is: %p\n", shared_thingy);
 

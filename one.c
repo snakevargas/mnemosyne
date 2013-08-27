@@ -35,7 +35,7 @@ int main() {
   ftruncate(shm_fd, thingy_size);
 
   // Mmap the shared mem
-  printf("Size: %lu\n", thingy_size);
+  printf("Size: %du\n", (unsigned int) thingy_size);
   void *shared_thingy = mmap(NULL, thingy_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
   if(shared_thingy == (void *) -1) {
     fprintf(stderr, "mmap error: %s\n", strerror(errno));
