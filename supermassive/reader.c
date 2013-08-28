@@ -5,39 +5,39 @@
 #include <errno.h>
 #include <string.h>
 
-#include "thingy.h"
-
+#include "util.h"
 
 
 int main() {
-  char *shm_name = "lol";
+  char *mem_name = "lol";
+  size_t mem_size = sizeof(char) * ONE_MEGA * 5;
 
   // Open the shared memory
-  int shm_fd = shm_open(shm_name, O_RDWR | O_CREAT, 0666);
-  if(shm_fd == -1) {
-    fprintf(stderr, "Error: %s\n", strerror(errno));
-    exit(-1);
-  }
-  printf("FD is: %d\n", shm_fd);
+  void *shared_mem = shm_create_map(mem_name, mem_size);
 
 
-  // Truncate to the right size
-  size_t thingy_size = sizeof(thingy_t);
-  ftruncate(shm_fd, thingy_size);
+  int *x = (int *) shm_malloc(shared_mem, sizeof(int));
+  int **next = (int **) shm_malloc(shared_mem, sizeof(int *));
+  int *y = (int *) shm_malloc(shared_mem, sizeof(int));
+/*
+  int address1 = 0;
+  int *x = (int *) shared_mem;
+  int address2 = address1 + sizeof(int);
+  int *y = (int *) (shared_mem + address2);
+*/
 
-  // Mmap the shared mem
-  printf("Size: %lu\n", thingy_size);
-  void *shared_thingy = mmap(NULL, thingy_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-  printf("Shared thingy address is: %p\n", shared_thingy);
+  // Print it out!
+  printf("X:%p = %d\n", x, *x);
+  printf("Next:%p = %p\n", next, *next);
+  printf("Y:%p = %d\n", y, *y);
+  printf("**Next %d\n", **next);
 
-  print_thingy(shared_thingy);
 
   sleep(1);
 
+  // Close the shared memory or maybe don't, since we're the client
+//  int status = shm_unlink_unmap(mem_name, mem_size, shared_mem);
 
-
-  // Close the shared memory
-  close(shm_fd);
 
   return 0;
 }

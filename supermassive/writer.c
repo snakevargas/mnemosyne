@@ -5,46 +5,39 @@
 #include <errno.h>
 #include <string.h>
 
-#define ONE_MEGA (1024 * 1024)
+#include "util.h"
 
 
 int main() {
-  char *shm_name = "lol";
-
-  // Open the shared memory
-  int shm_fd = shm_open(shm_name, O_RDWR | O_CREAT, 0777);
-  if(shm_fd == -1) {
-    fprintf(stderr, "shm_open error: %s\n", strerror(errno));
-    exit(-1);
-  }
-  printf("FD is: %d\n", shm_fd);
-
-
-  // Make the memory space the right size
+  char *mem_name = "lol";
   size_t mem_size = sizeof(char) * ONE_MEGA * 5;
-  ftruncate(shm_fd, mem_size);
 
+  // Create the shared memory
+  void *shared_mem = shm_create_map(mem_name, mem_size);
 
-  // Mmap the shared mem
-  printf("Size: %lu\n", mem_size);
-  void *shared_mem = mmap(NULL, mem_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-  if(shared_mem == (void *) -1) {
-    fprintf(stderr, "mmap error: %s\n", strerror(errno));
-  }
-  printf("Shared mem address is: %p\n", shared_mem);
+  // "malloc" 2 ints at the beginning
+  int *x = (int *) shm_malloc(shared_mem, sizeof(int));
+  int **next = (int **) shm_malloc(shared_mem, sizeof(int *));
+  int *y = (int *) shm_malloc(shared_mem, sizeof(int));
+  *x = 42;
+  *next = y;
+  *y = 13;
 
+  // Print it out!
+  printf("X:%p = %d\n", x, *x);
+  printf("Next:%p = %p\n", next, *next);
+  printf("Y:%p = %d\n", y, *y);
+  printf("**Next %d\n", **next);
 
   // Maybe twiddle some bits directly?
 
 
+  // Sleep so the other process can do some stuff
   sleep(10);
 
 
   // Close the shared memory
-  munmap(shared_mem, mem_size);
-  close(shm_fd);
-  int status = shm_unlink(shm_name);
-  printf("Unlink status: %d\n", status);
+  int status = shm_unlink_unmap(mem_name, mem_size, shared_mem);
 
   return 0;
 }
