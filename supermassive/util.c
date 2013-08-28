@@ -50,3 +50,22 @@ void *shm_malloc(void *shared_mem, size_t num_bytes) {
 }
 
 
+
+
+/********************************
+* Struct manipulation functions *
+********************************/
+
+thingy_t *create_struct(void *shared_mem) {
+  // Create the initial struct
+  thingy_t *the_thingy = (thingy_t *) shm_malloc(shared_mem, sizeof(thingy_t));
+
+}
+
+
+// struct def for reference
+typedef struct thingy_t {
+	int a;
+	int *b;
+} thingy_t;
+
