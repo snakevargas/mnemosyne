@@ -43,10 +43,18 @@ int shm_unlink_unmap(char *mem_name, size_t mem_size, void *shared_mem) {
 }
 
 
+/*
 void *shm_malloc(void *shared_mem, size_t num_bytes) {
   static size_t last_address = 0;
   last_address += num_bytes;
   return (void *) (shared_mem + last_address - num_bytes);
+}
+*/
+
+void *shm_malloc(size_t num_bytes) {
+  static size_t last_address = 0;
+  last_address += num_bytes;
+  return last_address - num_bytes;
 }
 
 
@@ -58,14 +66,24 @@ void *shm_malloc(void *shared_mem, size_t num_bytes) {
 
 thingy_t *create_struct(void *shared_mem) {
   // Create the initial struct
-  thingy_t *the_thingy = (thingy_t *) shm_malloc(shared_mem, sizeof(thingy_t));
+  int root_addr = shm_malloc(sizeof(thingy_t));
+  thingy_t *the_thingy = (thingy_t *) (shared_mem + root_addr);
+  the_thingy->b = shm_malloc(sizeof(thingy_t->b));
 
+  // The struct with offsets exists in the shared memory, now create a usable struct that points into the shared mem
+  return load_struct(shared_mem);
 }
 
+
+thingy_t load_struct(void *shared_mem) {
+  thingy_t *mapped_thingy = (thingy_t *) malloc(sizeof(thingy_t));
+  
+}
 
 // struct def for reference
 typedef struct thingy_t {
 	int a;
 	int *b;
 } thingy_t;
+
 
