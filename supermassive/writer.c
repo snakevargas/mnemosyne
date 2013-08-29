@@ -15,6 +15,10 @@ int main() {
   // Create the shared memory
   void *shared_mem = shm_create_map(mem_name, mem_size);
 
+  // Create the struct
+  thingy_t *thingy = create_struct(shared_mem);
+
+/*
   // "malloc" 2 ints at the beginning
   int *x = (int *) shm_malloc(shared_mem, sizeof(int));
   int **next = (int **) shm_malloc(shared_mem, sizeof(int *));
@@ -28,9 +32,13 @@ int main() {
   printf("Next:%p = %p\n", next, *next);
   printf("Y:%p = %d\n", y, *y);
   printf("**Next %d\n", **next);
+*/
 
   // Maybe twiddle some bits directly?
+  *thingy->a = 42;
+  *thingy->b = 13;
 
+  print_struct(thingy);
 
   // Sleep so the other process can do some stuff
   sleep(10);

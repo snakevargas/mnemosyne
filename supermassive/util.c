@@ -21,7 +21,7 @@ void *shm_create_map(char *shm_name, size_t mem_size) {
   ftruncate(shm_fd, mem_size);
 
   // Mmap the shared mem
-  printf("Size: %d\n", mem_size);
+  printf("Size: %hu\n", (unsigned int) mem_size);
   void *shared_mem = mmap(NULL, mem_size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
   if(shared_mem == (void *) -1) {
     fprintf(stderr, "mmap error: %s\n", strerror(errno));
@@ -51,7 +51,7 @@ void *shm_malloc(void *shared_mem, size_t num_bytes) {
 }
 */
 
-void *shm_malloc(size_t num_bytes) {
+size_t shm_malloc(size_t num_bytes) {
   static size_t last_address = 0;
   last_address += num_bytes;
   return last_address - num_bytes;
@@ -68,22 +68,27 @@ thingy_t *create_struct(void *shared_mem) {
   // Create the initial struct
   int root_addr = shm_malloc(sizeof(thingy_t));
   thingy_t *the_thingy = (thingy_t *) (shared_mem + root_addr);
-  the_thingy->b = shm_malloc(sizeof(thingy_t->b));
+  the_thingy->a = (int *) shm_malloc(sizeof(int *));
+  the_thingy->b = (int *) shm_malloc(sizeof(int *));
 
   // The struct with offsets exists in the shared memory, now create a usable struct that points into the shared mem
   return load_struct(shared_mem);
 }
 
 
-thingy_t load_struct(void *shared_mem) {
+thingy_t *load_struct(void *shared_mem) {
+  thingy_t *shm_thingy = (thingy_t *) (shared_mem);
   thingy_t *mapped_thingy = (thingy_t *) malloc(sizeof(thingy_t));
-  
+  mapped_thingy->a = (int *) (shared_mem + (long) shm_thingy->a);
+  mapped_thingy->b = (int *) (shared_mem + (long) shm_thingy->b);
+  return mapped_thingy;
 }
 
-// struct def for reference
-typedef struct thingy_t {
-	int a;
-	int *b;
-} thingy_t;
+
+void print_struct(thingy_t *thingy) {
+  printf("Thingy: %p\n", thingy);
+  printf("\tthingy->a: %p = %d\n", thingy->a, *thingy->a);
+  printf("\tthingy->b: %p = %d\n", thingy->a, *thingy->b);
+}
 
 
