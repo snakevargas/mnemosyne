@@ -2,9 +2,9 @@
 
 OS_NAME=`uname`
 if [ "$OS_NAME" == "Linux" ]; then
-	gcc writer.c util.c -o writer -lrt
+	gcc -std=c99 writer.c util.c -o writer -lrt
 else
-	gcc writer.c util.c -o writer
+	gcc -std=c99 writer.c util.c -o writer
 fi
 
 

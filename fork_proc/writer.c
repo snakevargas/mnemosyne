@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "util.h"
 
@@ -37,6 +38,18 @@ int main() {
     // This is the child process, run child code!
     child_logic(shared_mem);
   }
+
+  // Now fork off a bunch of children
+  for(int i = 0; i < 4; i++) {
+    pid_t child_pid = fork();
+    if(child_pid < 0) {
+      fprintf(stderr, "Fork error: %s\n", strerror(errno));
+    }
+    else if(child_pid == 0) {
+      child_logic(shared_mem);
+    }
+  }
+
 
   return 0;
 }
