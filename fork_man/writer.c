@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <signal.h>
 
+#include "util.h"
 
 
 #define MAX_NUM_CHILDREN 10
@@ -32,6 +33,8 @@ Operations:
 // Since we'll be using ephemeral shared memory for this struct, everything needs to be staticly allocated
 typedef struct comm_t {
   pid_t child_pid;
+  char shm_name[32];
+  long shm_size;
   time_t last_hb_time;
   int status;
   long response_size;
@@ -39,6 +42,16 @@ typedef struct comm_t {
 } comm_t;
 
 
+// A simple list to keep track of all the children
+typedef struct child_info_list_t {
+  comm_t *data;
+  struct child_info_list_t *next;
+} child_info_list_t;
+
+
+child_info_list_t *insert_child(child_info_list_t *child_list, comm_t *data);
+void delete_child(child_info_list_t *child_list, pid_t child_pid);
+comm_t *get_child(child_info_list_t *child_list, pid_t child_pid);
 
 
 void child_logic();
@@ -54,8 +67,10 @@ int main() {
   char *read_buffer = (char *) malloc(sizeof(char) * rd_buf_size);
   memset(read_buffer, 0, rd_buf_size);
 
+  child_info_list_t *child_list;
   pid_t child_pids[MAX_NUM_CHILDREN];
   int num_children = 0;
+  int child_counter = 0;
 
 
   // Open up the control file, this will be used for external programs to issue commands to the process manager
@@ -107,6 +122,17 @@ int main() {
       }
       if((strncmp(read_buffer, "fork", 4) == 0) && (num_children < MAX_NUM_CHILDREN)) {
         printf("Forking child!\n");
+
+        // First, set up the communications memory
+        char child_mem_name[32];
+        memset(child_mem_name, 0, 32);
+        sprintf(child_mem_name, "ajtest_%d", child_counter);
+        child_counter++;
+        comm_t *child_shm = (comm_t *) shm_create_map(child_mem_name, sizeof(comm_t));
+        strcpy(child_shm->shm_name, child_mem_name);
+        child_shm->shm_size = sizeof(comm_t);
+        child_list = insert_child(child_list, child_shm);
+
         pid_t child_pid = fork();
         if(child_pid < 0) {
           fprintf(stderr, "Fork error: %s\n", strerror(errno));
@@ -118,6 +144,7 @@ int main() {
         }
         else {
           // Parent process, save the pid for killing later
+          child_shm->child_pid = child_pid;
           child_pids[num_children] = child_pid;
           num_children++;
         }
@@ -141,25 +168,6 @@ int main() {
   return 0;
 }
 
-/*
-  // Fork out the child processes
-  pid_t child_pid = fork();
-  if(child_pid < 0) {
-    fprintf(stderr, "Fork error: %s\n", strerror(errno));
-  }
-
-  if(child_pid > 0) {
-    // Save the child pid for later, so we can issue commands to the children
-    // TODO: err.. do this later, whatever
-    // Do parent code here
-    parent_logic(shared_mem);
-  }
-  if(child_pid == 0) {
-    // This is the child process, run child code!
-    child_logic(shared_mem);
-  }
-
-*/
 
 
 void child_logic() {
@@ -168,4 +176,58 @@ void child_logic() {
   printf("My parent is %d and i am %d\n", parent_pid, my_pid);
   sleep(10);
 }
+
+
+
+child_info_list_t *insert_child(child_info_list_t *child_list, comm_t *data) {
+  child_info_list_t *child = (child_info_list_t *) malloc(sizeof(child_info_list_t));
+  child->data = data;
+  child->next = child_list;
+  if(child_list != NULL) {
+    child_list->next = child;
+  } else {
+    child_list = child;
+  }
+  return child_list;
+}
+
+
+
+void delete_child(child_info_list_t *child_list, pid_t child_pid) {
+  int child_deleted = 0;
+  child_info_list_t *curr_child = child_list;
+  child_info_list_t *prev_child = NULL;
+  while(curr_child != NULL && child_deleted == 0) {
+    if(curr_child->data->child_pid == child_pid) {
+      // This is the child we're looking for, delete it
+      if(prev_child == NULL) {
+        child_list = curr_child->next;
+      } else {
+        prev_child->next = curr_child->next;
+      }
+      prev_child = curr_child;
+      curr_child = curr_child->next;
+      shm_unlink_unmap(prev_child->data->shm_name, prev_child->data->shm_size, prev_child->data);
+      free(prev_child);
+      child_deleted = 1;
+    } else {
+      prev_child = curr_child;
+      curr_child = curr_child->next;
+    }
+  }
+}
+
+
+
+comm_t *get_child(child_info_list_t *child_list, pid_t child_pid) {
+  child_info_list_t *curr_child = child_list;
+  while(curr_child != NULL) {
+    if(curr_child->data->child_pid == child_pid) {
+      return curr_child->data;
+    }
+  }
+  return NULL;
+}
+
+
 
