@@ -10,6 +10,10 @@
 #include <signal.h>
 
 
+
+#define MAX_NUM_CHILDREN 10
+
+
 /*
 Operations:
   fork new worker
@@ -22,6 +26,19 @@ Operations:
 
 // Need way for external process to issue commands to the manager
 // use a fifo file for now?
+
+
+// This struct will be used to communicate (2-way) with child processes via shared memory
+// Since we'll be using ephemeral shared memory for this struct, everything needs to be staticly allocated
+typedef struct comm_t {
+  pid_t child_pid;
+  time_t last_hb_time;
+  int status;
+  long response_size;
+  char response_name[32];
+} comm_t;
+
+
 
 
 void child_logic();
@@ -37,10 +54,11 @@ int main() {
   char *read_buffer = (char *) malloc(sizeof(char) * rd_buf_size);
   memset(read_buffer, 0, rd_buf_size);
 
-  pid_t child_pids[10];
+  pid_t child_pids[MAX_NUM_CHILDREN];
   int num_children = 0;
 
 
+  // Open up the control file, this will be used for external programs to issue commands to the process manager
   ctrl_file = open("ctrl_file", O_RDONLY);
   if(ctrl_file == -1) {
     fprintf(stderr, "open failed on %s: %s\n", control_file, strerror(errno));
@@ -49,6 +67,8 @@ int main() {
   struct pollfd x[1];
   x[0].fd = ctrl_file;
   x[0].events = POLLIN | POLLHUP;
+
+  // Main event loop
   while(requested_hup != 1) {
     if(need_open_pipe == 1) {
       ctrl_file = open("ctrl_file", O_RDONLY);
@@ -85,7 +105,7 @@ int main() {
           printf("\tChild[%d] : %d\n", i, child_pids[i]);
         }
       }
-      if(strncmp(read_buffer, "fork", 4) == 0) {
+      if((strncmp(read_buffer, "fork", 4) == 0) && (num_children < MAX_NUM_CHILDREN)) {
         printf("Forking child!\n");
         pid_t child_pid = fork();
         if(child_pid < 0) {
