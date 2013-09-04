@@ -8,6 +8,7 @@
 #include <poll.h>
 #include <sys/types.h>
 #include <signal.h>
+#include <time.h>
 
 #include "util.h"
 
@@ -29,12 +30,18 @@ Operations:
 // use a fifo file for now?
 
 
+typedef enum {NO_COMMAND, COMMAND_FROM_PARENT_READY, COMMAND_IN_USE_BY_CHILD} command_status_t;
+typedef enum {NO_OP, COMMAND_DIE} command_t;
+typedef enum {LISTENING, PROCESSING, EXITING, DEAD} status_t;
+
 // This struct will be used to communicate (2-way) with child processes via shared memory
 // Since we'll be using ephemeral shared memory for this struct, everything needs to be staticly allocated
 typedef struct comm_t {
   pid_t child_pid;
+  command_t command;
+  command_status_t command_status;
   time_t last_hb_time;
-  int status;
+  status_t status;
   long response_size;
   char response_name[32];
 } comm_t;
@@ -51,15 +58,17 @@ typedef struct child_info_list_t {
 
 child_info_list_t *insert_child(child_info_list_t *child_list, comm_t *data);
 void delete_whole_list(child_info_list_t *child_list);
-void delete_child(child_info_list_t *child_list, pid_t child_pid);
+void delete_child(child_info_list_t **child_list, pid_t child_pid);
 comm_t *get_child(child_info_list_t *child_list, pid_t child_pid);
 
 
 void print_child_data(child_info_list_t *child_list);
 void kill_all_children(child_info_list_t *child_list);
+void request_exit_all_children(child_info_list_t *child_list);
+void purge_dead_children(child_info_list_t **child_list);
 
 
-void child_logic();
+void child_logic(comm_t *comm_mem);
 
 
 int main() {
@@ -139,7 +148,7 @@ int main() {
         }
         if(child_pid == 0) {
           // Child process, do child logic
-          child_logic();
+          child_logic(child_shm);
           exit(0); // Need to exit here so the children don't try polling the fifo pipe
         }
         else {
@@ -147,9 +156,17 @@ int main() {
           child_shm->child_pid = child_pid;
         }
       }
+      if(strncmp(read_buffer, "nice kill", 9) == 0) {
+        printf("Sending exit request to children!\n");
+        request_exit_all_children(child_list);
+      }
       if(strncmp(read_buffer, "kill", 4) == 0) {
         printf("Killing children!\n");
 				kill_all_children(child_list);
+      }
+      if(strncmp(read_buffer, "purge", 5) == 0) {
+        printf("Purging dead children from the pid list\n");
+        purge_dead_children(&child_list);
       }
     }
     if(x->revents & POLLHUP != 0) {
@@ -166,11 +183,34 @@ int main() {
 
 
 
-void child_logic() {
+void child_logic(comm_t *comm_mem) {
+  int requested_exit = 0;
   pid_t my_pid = getpid();
   pid_t parent_pid = getppid();
   printf("[CHILD] My parent is %d and i am %d\n", parent_pid, my_pid);
-  sleep(30);
+  comm_mem->status = LISTENING;
+  while(requested_exit == 0) {
+    // Heartbeat!
+    time(&comm_mem->last_hb_time);
+
+    // Check to see if there is a command from the parent
+    if(comm_mem->command_status == COMMAND_FROM_PARENT_READY) {
+      comm_mem->command_status = COMMAND_IN_USE_BY_CHILD;
+      switch(comm_mem->command) {
+        case COMMAND_DIE:
+          comm_mem->status = EXITING;
+          printf("Child %d here, I was requested to exit.\n", comm_mem->child_pid);
+          requested_exit = 1;
+          break;
+        default:
+          break;
+      }
+      comm_mem->command_status = NO_COMMAND;
+    }
+
+    sleep(1); // Just to keep the thread from spinning too fast and eating ALL THE CPU
+  }
+  comm_mem->status = DEAD;
 }
 
 
@@ -201,15 +241,15 @@ void delete_whole_list(child_info_list_t *child_list) {
 
 
 
-void delete_child(child_info_list_t *child_list, pid_t child_pid) {
+void delete_child(child_info_list_t **child_list, pid_t child_pid) {
   int child_deleted = 0;
-  child_info_list_t *curr_child = child_list;
+  child_info_list_t *curr_child = *child_list;
   child_info_list_t *prev_child = NULL;
   while(curr_child != NULL && child_deleted == 0) {
     if(curr_child->data->child_pid == child_pid) {
       // This is the child we're looking for, delete it
       if(prev_child == NULL) {
-        child_list = curr_child->next;
+        *child_list = curr_child->next;
       } else {
         prev_child->next = curr_child->next;
       }
@@ -248,7 +288,22 @@ void print_child_data(child_info_list_t *child_list) {
 		printf("\tshm_name: %s\n", curr_child->shm_name);
 		printf("\tshm_size: %ld\n", curr_child->shm_size);
 		printf("\tlast_hb: %ld\n", curr_child->data->last_hb_time);
-		printf("\tstatus: %d\n", curr_child->data->status);
+    switch(curr_child->data->status) {
+      case LISTENING:
+    		printf("\tstatus: LISTENING\n");
+        break;
+      case PROCESSING:
+    		printf("\tstatus: PROCESSING\n");
+        break;
+      case EXITING:
+    		printf("\tstatus: EXITING\n");
+        break;
+      case DEAD:
+    		printf("\tstatus: DEAD\n");
+        break;
+      default:
+        break;
+    }
 		printf("\tdata: %p\n", curr_child->data);
 		curr_child = curr_child->next;
 	}
@@ -266,6 +321,32 @@ void kill_all_children(child_info_list_t *child_list) {
 	// Delete all child nodes
 	delete_whole_list(child_list);
 }
+
+
+
+void request_exit_all_children(child_info_list_t *child_list) {
+  child_info_list_t *curr_child = child_list;
+  while(curr_child != NULL) {
+    if(curr_child->data->command_status == NO_COMMAND) {
+      curr_child->data->command = COMMAND_DIE;
+      curr_child->data->command_status = COMMAND_FROM_PARENT_READY;
+    }
+    curr_child = curr_child->next;
+  }
+}
+
+
+
+void purge_dead_children(child_info_list_t **child_list) {
+  child_info_list_t *curr_child = *child_list;
+  while(curr_child != NULL) {
+    if(curr_child->data->status == DEAD) {
+      delete_child(child_list, curr_child->data->child_pid);
+    }
+    curr_child = curr_child->next;
+  }
+}
+
 
 
 
