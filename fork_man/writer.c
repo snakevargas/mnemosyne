@@ -33,8 +33,6 @@ Operations:
 // Since we'll be using ephemeral shared memory for this struct, everything needs to be staticly allocated
 typedef struct comm_t {
   pid_t child_pid;
-  char shm_name[32];
-  long shm_size;
   time_t last_hb_time;
   int status;
   long response_size;
@@ -44,14 +42,21 @@ typedef struct comm_t {
 
 // A simple list to keep track of all the children
 typedef struct child_info_list_t {
+	char shm_name[32];
+	long shm_size;
   comm_t *data;
   struct child_info_list_t *next;
 } child_info_list_t;
 
 
 child_info_list_t *insert_child(child_info_list_t *child_list, comm_t *data);
+void delete_whole_list(child_info_list_t *child_list);
 void delete_child(child_info_list_t *child_list, pid_t child_pid);
 comm_t *get_child(child_info_list_t *child_list, pid_t child_pid);
+
+
+void print_child_data(child_info_list_t *child_list);
+void kill_all_children(child_info_list_t *child_list);
 
 
 void child_logic();
@@ -67,9 +72,7 @@ int main() {
   char *read_buffer = (char *) malloc(sizeof(char) * rd_buf_size);
   memset(read_buffer, 0, rd_buf_size);
 
-  child_info_list_t *child_list;
-  pid_t child_pids[MAX_NUM_CHILDREN];
-  int num_children = 0;
+  child_info_list_t *child_list = NULL;
   int child_counter = 0;
 
 
@@ -98,7 +101,6 @@ int main() {
       fprintf(stderr, "Poll no good\n");
       exit(-1);
     }
-    printf("YAY! Polled!\n");
     if(x->events & x->revents == 0) {
       fprintf(stderr, "Events no good: e%d r%d", x->events, x->revents);
       exit(-1);
@@ -115,23 +117,21 @@ int main() {
       }
       if(strncmp(read_buffer, "status", 6) == 0) {
         // Get status, print out the child pids
-        printf("Child pids:\n");
-        for(int i = 0; i < num_children; i++) {
-          printf("\tChild[%d] : %d\n", i, child_pids[i]);
-        }
+        printf("Child info:\n");
+				print_child_data(child_list);
       }
-      if((strncmp(read_buffer, "fork", 4) == 0) && (num_children < MAX_NUM_CHILDREN)) {
+      if(strncmp(read_buffer, "fork", 4) == 0) {
         printf("Forking child!\n");
 
         // First, set up the communications memory
         char child_mem_name[32];
         memset(child_mem_name, 0, 32);
-        sprintf(child_mem_name, "ajtest_%d", child_counter);
+        sprintf(child_mem_name, "/ajtest_%d", child_counter);
         child_counter++;
         comm_t *child_shm = (comm_t *) shm_create_map(child_mem_name, sizeof(comm_t));
-        strcpy(child_shm->shm_name, child_mem_name);
-        child_shm->shm_size = sizeof(comm_t);
         child_list = insert_child(child_list, child_shm);
+				strcpy(child_list->shm_name, child_mem_name);
+        child_list->shm_size = sizeof(comm_t);
 
         pid_t child_pid = fork();
         if(child_pid < 0) {
@@ -145,15 +145,11 @@ int main() {
         else {
           // Parent process, save the pid for killing later
           child_shm->child_pid = child_pid;
-          child_pids[num_children] = child_pid;
-          num_children++;
         }
       }
       if(strncmp(read_buffer, "kill", 4) == 0) {
         printf("Killing children!\n");
-        for(int i = 0; i < num_children; i++) {
-//          kill(child_pids[i], 15);
-        }
+				kill_all_children(child_list);
       }
     }
     if(x->revents & POLLHUP != 0) {
@@ -173,8 +169,8 @@ int main() {
 void child_logic() {
   pid_t my_pid = getpid();
   pid_t parent_pid = getppid();
-  printf("My parent is %d and i am %d\n", parent_pid, my_pid);
-  sleep(10);
+  printf("[CHILD] My parent is %d and i am %d\n", parent_pid, my_pid);
+  sleep(30);
 }
 
 
@@ -183,12 +179,24 @@ child_info_list_t *insert_child(child_info_list_t *child_list, comm_t *data) {
   child_info_list_t *child = (child_info_list_t *) malloc(sizeof(child_info_list_t));
   child->data = data;
   child->next = child_list;
-  if(child_list != NULL) {
-    child_list->next = child;
-  } else {
-    child_list = child;
-  }
+  child_list = child;
   return child_list;
+}
+
+
+
+void delete_whole_list(child_info_list_t *child_list) {
+	child_info_list_t *curr_child = child_list;
+	child_info_list_t *prev_child = NULL;
+	while(curr_child != NULL) {
+		fprintf(stderr, "Cleaning up %d...", curr_child->data->child_pid);
+		prev_child = curr_child;
+		curr_child = curr_child->next;
+		shm_unlink_unmap(prev_child->shm_name, prev_child->shm_size, prev_child->data);
+		fprintf(stderr, "shm clear...");
+		free(prev_child);
+		fprintf(stderr, "free...\n");
+	}
 }
 
 
@@ -207,7 +215,9 @@ void delete_child(child_info_list_t *child_list, pid_t child_pid) {
       }
       prev_child = curr_child;
       curr_child = curr_child->next;
-      shm_unlink_unmap(prev_child->data->shm_name, prev_child->data->shm_size, prev_child->data);
+			if(prev_child->data != NULL) {
+	      shm_unlink_unmap(prev_child->shm_name, prev_child->shm_size, prev_child->data);
+			}
       free(prev_child);
       child_deleted = 1;
     } else {
@@ -227,6 +237,34 @@ comm_t *get_child(child_info_list_t *child_list, pid_t child_pid) {
     }
   }
   return NULL;
+}
+
+
+
+void print_child_data(child_info_list_t *child_list) {
+	child_info_list_t *curr_child = child_list;
+	while(curr_child != NULL) {
+		printf("Child pid: %d\n", curr_child->data->child_pid);
+		printf("\tshm_name: %s\n", curr_child->shm_name);
+		printf("\tshm_size: %ld\n", curr_child->shm_size);
+		printf("\tlast_hb: %ld\n", curr_child->data->last_hb_time);
+		printf("\tstatus: %d\n", curr_child->data->status);
+		printf("\tdata: %p\n", curr_child->data);
+		curr_child = curr_child->next;
+	}
+}
+
+
+
+void kill_all_children(child_info_list_t *child_list) {
+	child_info_list_t *curr_child = child_list;
+	while(curr_child != NULL) {
+		kill(curr_child->data->child_pid, 9);
+		curr_child = curr_child->next;
+	}
+	printf("Child processes killed. Cleaning up\n");
+	// Delete all child nodes
+	delete_whole_list(child_list);
 }
 
 
