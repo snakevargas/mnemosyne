@@ -31,8 +31,8 @@ Operations:
 
 
 typedef enum {NO_COMMAND, COMMAND_FROM_PARENT_READY, COMMAND_IN_USE_BY_CHILD} command_status_t;
-typedef enum {NO_OP, COMMAND_DIE} command_t;
-typedef enum {LISTENING, PROCESSING, EXITING, DEAD} status_t;
+typedef enum {NO_OP, COMMAND_PROCESS_INPUT, COMMAND_DIE} command_t;
+typedef enum {LISTENING, PROCESSING, FINISHED_WORK, WORK_VALIDATED, EXITING, DEAD} status_t;
 
 // This struct will be used to communicate (2-way) with child processes via shared memory
 // Since we'll be using ephemeral shared memory for this struct, everything needs to be staticly allocated
@@ -42,6 +42,9 @@ typedef struct comm_t {
   command_status_t command_status;
   time_t last_hb_time;
   status_t status;
+
+  long request_size;
+  char request_name[32];
   long response_size;
   char response_name[32];
 } comm_t;
@@ -52,6 +55,7 @@ typedef struct child_info_list_t {
 	char shm_name[32];
 	long shm_size;
   comm_t *data;
+  char *request_shm; // For clean up purposes only
   struct child_info_list_t *next;
 } child_info_list_t;
 
@@ -66,6 +70,8 @@ void print_child_data(child_info_list_t *child_list);
 void kill_all_children(child_info_list_t *child_list);
 void request_exit_all_children(child_info_list_t *child_list);
 void purge_dead_children(child_info_list_t **child_list);
+void issue_work(child_info_list_t *child_list, char *input);
+void validate_child_work(child_info_list_t *child_list);
 
 
 void child_logic(comm_t *comm_mem);
@@ -168,6 +174,18 @@ int main() {
         printf("Purging dead children from the pid list\n");
         purge_dead_children(&child_list);
       }
+      if(strncmp(read_buffer, "issue", 5) == 0) {
+        printf("Looking for an idle child to issue the work to\n");
+        char *test_input = (char *) malloc(100);
+        memset(test_input, 0, 100);
+        sprintf(test_input, "This is the test input! What awesomeness!");
+        issue_work(child_list, test_input);
+        free(test_input);
+      }
+      if(strncmp(read_buffer, "work finished", 13) == 0) {
+        // Some child has finished their work, and we're being lazy, so figure out which one by iterating over the list
+        validate_child_work(child_list);
+      }
     }
     if(x->revents & POLLHUP != 0) {
       // We need to hangup the pipe and reopen it
@@ -194,6 +212,9 @@ void child_logic(comm_t *comm_mem) {
     time(&comm_mem->last_hb_time);
 
     // Check to see if there is a command from the parent
+    if(comm_mem->status == WORK_VALIDATED) {
+      comm_mem->status = LISTENING;
+    }
     if(comm_mem->command_status == COMMAND_FROM_PARENT_READY) {
       comm_mem->command_status = COMMAND_IN_USE_BY_CHILD;
       switch(comm_mem->command) {
@@ -201,6 +222,25 @@ void child_logic(comm_t *comm_mem) {
           comm_mem->status = EXITING;
           printf("Child %d here, I was requested to exit.\n", comm_mem->child_pid);
           requested_exit = 1;
+          break;
+        case COMMAND_PROCESS_INPUT:
+          comm_mem->status = PROCESSING;
+          // Open up the shared memory for the input
+          char *request_shm = (char *) shm_create_map(comm_mem->request_name, comm_mem->request_size);
+          // Do the work
+          char *response_string = (char *) malloc(comm_mem->request_size + 100);
+          memset(response_string, 0, comm_mem->request_size + 100);
+          sprintf(response_string, "%s out: BLAH BLAH BLAH!", request_shm);
+
+          // Now open up the response shared memory
+          sprintf(comm_mem->response_name, "child_%d_response", comm_mem->child_pid);
+          comm_mem->response_size = strlen(response_string);
+          char *response_shm = (char *) shm_create_map(comm_mem->response_name, comm_mem->response_size);
+          memcpy(response_shm, response_string, comm_mem->response_size);
+          sleep(5); // Simulate difficult work! :P
+          comm_mem->status = FINISHED_WORK;
+          // Signal the parent (being lazy, just use the ctrl_file fifo)
+          system("echo \"work finished\" > ctrl_file");
           break;
         default:
           break;
@@ -257,6 +297,7 @@ void delete_child(child_info_list_t **child_list, pid_t child_pid) {
       curr_child = curr_child->next;
 			if(prev_child->data != NULL) {
 	      shm_unlink_unmap(prev_child->shm_name, prev_child->shm_size, prev_child->data);
+    		fprintf(stderr, "shm clear...\n");
 			}
       free(prev_child);
       child_deleted = 1;
@@ -300,6 +341,9 @@ void print_child_data(child_info_list_t *child_list) {
         break;
       case DEAD:
     		printf("\tstatus: DEAD\n");
+        break;
+      case FINISHED_WORK:
+        printf("\tstatus: FINISHED WORK\n");
         break;
       default:
         break;
@@ -346,6 +390,58 @@ void purge_dead_children(child_info_list_t **child_list) {
     curr_child = curr_child->next;
   }
 }
+
+
+
+void issue_work(child_info_list_t *child_list, char *input) {
+  child_info_list_t *curr_child = child_list;
+  int work_issued = 0;
+  while(curr_child != NULL && work_issued == 0) {
+    if(curr_child->data->status == LISTENING && curr_child->data->command_status == NO_COMMAND) {
+      // We found an idle child, issue the work to it
+      // Create the input shm, construct the name & figure out the size
+      sprintf(curr_child->data->request_name, "%s_input", curr_child->shm_name);
+      curr_child->data->request_size = strlen(input);
+      char *request_shm = (char *) shm_create_map(curr_child->data->request_name, curr_child->data->request_size);
+      memcpy(request_shm, input, curr_child->data->request_size);
+      // Save off the request shm for clean up purposes later
+      curr_child->request_shm = request_shm;
+
+      // Input shm has been created, issue the command to actually work on it
+      curr_child->data->command = COMMAND_PROCESS_INPUT;
+      curr_child->data->command_status = COMMAND_FROM_PARENT_READY;
+      work_issued = 1;
+      printf("Assigned work to child %d\n", curr_child->data->child_pid);
+    }
+    curr_child = curr_child->next;
+  }
+  if(work_issued == 0) {
+    printf("Could not find an idle child to assign work to!\n");
+  }
+}
+
+
+
+void validate_child_work(child_info_list_t *child_list) {
+  child_info_list_t *curr_child = child_list;
+  while(curr_child != NULL) {
+    if(curr_child->data->status == FINISHED_WORK) {
+      // This child has some finished work for us
+      // Open the shared mem to the child's response
+      char *response_shm = shm_create_map(curr_child->data->response_name, curr_child->data->response_size);
+      printf("Child %d has finished work:\n\tResult: %s\n", curr_child->data->child_pid, response_shm);
+      // Clean up the response shm
+      shm_unlink_unmap(curr_child->data->response_name, curr_child->data->response_size, response_shm);
+      // Clean up the request shm too (maybe do this somewhere else, I dunno
+      shm_unlink_unmap(curr_child->data->request_name, curr_child->data->request_size, curr_child->request_shm);
+
+      // Set the status of the child
+      curr_child->data->status = WORK_VALIDATED;
+    }
+    curr_child = curr_child->next;
+  }
+}
+
 
 
 
