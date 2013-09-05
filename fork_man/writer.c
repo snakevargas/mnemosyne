@@ -1,80 +1,25 @@
-#include <stdlib.h>
-#include <stdio.h>
-#include <sys/mman.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <string.h>
-#include <unistd.h>
-#include <poll.h>
-#include <sys/types.h>
-#include <signal.h>
-#include <time.h>
+#include "includes.h"
 
 #include "util.h"
+#include "forkman.h"
 
-
-#define MAX_NUM_CHILDREN 10
-
-
-/*
-Operations:
-  fork new worker
-  kill specific worker
-  kill all workers
-  get healthcheck of workers? (maybe rolled into the commands stuff below)
-  issue specific command to specific worker
-  issue specific command to all workers
-*/
-
-// Need way for external process to issue commands to the manager
-// use a fifo file for now?
-
-
-typedef enum {NO_COMMAND, COMMAND_FROM_PARENT_READY, COMMAND_IN_USE_BY_CHILD} command_status_t;
-typedef enum {NO_OP, COMMAND_PROCESS_INPUT, COMMAND_DIE} command_t;
-typedef enum {LISTENING, PROCESSING, FINISHED_WORK, WORK_VALIDATED, EXITING, DEAD} status_t;
-
-// This struct will be used to communicate (2-way) with child processes via shared memory
-// Since we'll be using ephemeral shared memory for this struct, everything needs to be staticly allocated
-typedef struct comm_t {
-  pid_t child_pid;
-  command_t command;
-  command_status_t command_status;
-  time_t last_hb_time;
-  status_t status;
-
-  long request_size;
-  char request_name[32];
-  long response_size;
-  char response_name[32];
-} comm_t;
-
-
-// A simple list to keep track of all the children
-typedef struct child_info_list_t {
-	char shm_name[32];
-	long shm_size;
-  comm_t *data;
-  char *request_shm; // For clean up purposes only
-  struct child_info_list_t *next;
-} child_info_list_t;
+#include "child.h"
 
 
 child_info_list_t *insert_child(child_info_list_t *child_list, comm_t *data);
-void delete_whole_list(child_info_list_t *child_list);
+void delete_whole_list(child_info_list_t **child_list);
 void delete_child(child_info_list_t **child_list, pid_t child_pid);
 comm_t *get_child(child_info_list_t *child_list, pid_t child_pid);
 
 
 void print_child_data(child_info_list_t *child_list);
-void kill_all_children(child_info_list_t *child_list);
+void kill_all_children(child_info_list_t **child_list);
 void request_exit_all_children(child_info_list_t *child_list);
 void purge_dead_children(child_info_list_t **child_list);
 void issue_work(child_info_list_t *child_list, char *input);
 void validate_child_work(child_info_list_t *child_list);
 
 
-void child_logic(comm_t *comm_mem);
 
 
 int main() {
@@ -168,7 +113,7 @@ int main() {
       }
       if(strncmp(read_buffer, "kill", 4) == 0) {
         printf("Killing children!\n");
-				kill_all_children(child_list);
+				kill_all_children(&child_list);
       }
       if(strncmp(read_buffer, "purge", 5) == 0) {
         printf("Purging dead children from the pid list\n");
@@ -201,57 +146,6 @@ int main() {
 
 
 
-void child_logic(comm_t *comm_mem) {
-  int requested_exit = 0;
-  pid_t my_pid = getpid();
-  pid_t parent_pid = getppid();
-  printf("[CHILD] My parent is %d and i am %d\n", parent_pid, my_pid);
-  comm_mem->status = LISTENING;
-  while(requested_exit == 0) {
-    // Heartbeat!
-    time(&comm_mem->last_hb_time);
-
-    // Check to see if there is a command from the parent
-    if(comm_mem->status == WORK_VALIDATED) {
-      comm_mem->status = LISTENING;
-    }
-    if(comm_mem->command_status == COMMAND_FROM_PARENT_READY) {
-      comm_mem->command_status = COMMAND_IN_USE_BY_CHILD;
-      switch(comm_mem->command) {
-        case COMMAND_DIE:
-          comm_mem->status = EXITING;
-          printf("Child %d here, I was requested to exit.\n", comm_mem->child_pid);
-          requested_exit = 1;
-          break;
-        case COMMAND_PROCESS_INPUT:
-          comm_mem->status = PROCESSING;
-          // Open up the shared memory for the input
-          char *request_shm = (char *) shm_create_map(comm_mem->request_name, comm_mem->request_size);
-          // Do the work
-          char *response_string = (char *) malloc(comm_mem->request_size + 100);
-          memset(response_string, 0, comm_mem->request_size + 100);
-          sprintf(response_string, "%s out: BLAH BLAH BLAH!", request_shm);
-
-          // Now open up the response shared memory
-          sprintf(comm_mem->response_name, "child_%d_response", comm_mem->child_pid);
-          comm_mem->response_size = strlen(response_string);
-          char *response_shm = (char *) shm_create_map(comm_mem->response_name, comm_mem->response_size);
-          memcpy(response_shm, response_string, comm_mem->response_size);
-          sleep(5); // Simulate difficult work! :P
-          comm_mem->status = FINISHED_WORK;
-          // Signal the parent (being lazy, just use the ctrl_file fifo)
-          system("echo \"work finished\" > ctrl_file");
-          break;
-        default:
-          break;
-      }
-      comm_mem->command_status = NO_COMMAND;
-    }
-
-    sleep(1); // Just to keep the thread from spinning too fast and eating ALL THE CPU
-  }
-  comm_mem->status = DEAD;
-}
 
 
 
@@ -265,8 +159,8 @@ child_info_list_t *insert_child(child_info_list_t *child_list, comm_t *data) {
 
 
 
-void delete_whole_list(child_info_list_t *child_list) {
-	child_info_list_t *curr_child = child_list;
+void delete_whole_list(child_info_list_t **child_list) {
+	child_info_list_t *curr_child = *child_list;
 	child_info_list_t *prev_child = NULL;
 	while(curr_child != NULL) {
 		fprintf(stderr, "Cleaning up %d...", curr_child->data->child_pid);
@@ -277,6 +171,7 @@ void delete_whole_list(child_info_list_t *child_list) {
 		free(prev_child);
 		fprintf(stderr, "free...\n");
 	}
+  *child_list = NULL;
 }
 
 
@@ -355,8 +250,8 @@ void print_child_data(child_info_list_t *child_list) {
 
 
 
-void kill_all_children(child_info_list_t *child_list) {
-	child_info_list_t *curr_child = child_list;
+void kill_all_children(child_info_list_t **child_list) {
+	child_info_list_t *curr_child = *child_list;
 	while(curr_child != NULL) {
 		kill(curr_child->data->child_pid, 9);
 		curr_child = curr_child->next;
